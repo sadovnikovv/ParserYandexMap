@@ -1,6 +1,7 @@
 
 # generated excel outputs
 out_*.xlsx
+~$out_*.xlsx
 .idea/workspace.xml
 .idea/tasks.xml
 .idea/shelf/

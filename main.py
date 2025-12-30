@@ -21,11 +21,17 @@ import requests
 import openpyxl
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, PatternFill, Alignment
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 # ===================== ШАПКА: МЕНЯЕТЕ ТОЛЬКО ЭТО =====================
 
-API_KEY = "77c0977c-5d69-45fb-84c7-44afcce951cb"
+API_KEY = os.getenv("YM_API_KEY", "").strip()
+if not API_KEY:
+    raise RuntimeError("YM_API_KEY не задан. Создайте .env (см. .env.example) и укажите ключ.")
 
 TEXT = "Металлопрокат"
 LANG = "ru_RU"

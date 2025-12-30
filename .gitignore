@@ -6,4 +6,5 @@ out_*.xlsx
 .idea/shelf/
 .idea/dataSources/
 .idea/dataSources.local.xml
+.env
 

@@ -1,0 +1,29 @@
+# Ignore everything in .idea by default
+*
+
+# But keep this .gitignore itself
+!.gitignore
+
+# --- Shareable project settings (whitelist) ---
+!codeStyles/
+!codeStyles/*
+!inspectionProfiles/
+!inspectionProfiles/*
+!runConfigurations/
+!runConfigurations/*
+!vcs.xml
+!modules.xml
+!misc.xml
+!encodings.xml
+!compiler.xml
+!jarRepositories.xml
+
+# --- Always ignore user-specific stuff (even if created) ---
+workspace.xml
+tasks.xml
+usage.statistics.xml
+shelf/
+dictionaries/
+httpRequests/
+dataSources/
+dataSources.local.xml

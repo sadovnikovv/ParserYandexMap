@@ -7,7 +7,7 @@ Yandex Maps (API Поиска по организациям) -> Excel (1 фай�
 - Все параметры задаются в шапке (константы ниже).
 - Никакого ввода с консоли.
 - Один xlsx-файл, имя включает дату/время.
-- Внутри файла: лист "Запрос" (параметры/время) + лист "Организации" (вся доступная инфа).
+- Внутри файла: лист "Организации" (вся доступная инфа) + лист "Запрос" (параметры/время).
 - Логи в консоль лаконичные: 1-я строка (файл+параметры), далее короткий прогресс.
 """
 
@@ -27,7 +27,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 
 API_KEY = "77c0977c-5d69-45fb-84c7-44afcce951cb"
 
-TEXT = "поставка металлопроката заготовками"
+TEXT = "Металлопрокат"
 LANG = "ru_RU"
 
 # Центр области поиска (Москва)
@@ -35,7 +35,7 @@ CENTER_LON = 37.6173   # долгота
 CENTER_LAT = 55.7558   # широта
 
 # Диаметр области в км (например 17.2 = радиус 8.6 км)
-DIAMETER_KM = 17.2
+DIAMETER_KM = 40
 
 # Пагинация/ограничения API
 RESULTS_PER_PAGE = 50     # max 50
@@ -187,32 +187,64 @@ def ymaps_search_page(session: requests.Session, bbox: str, skip: int) -> List[d
         "skip": skip,
     }
 
-    r = session.get(url, params=params, timeout=25)
+    # Ретраи для временных проблем
+    retry_statuses = {429, 500, 502, 503, 504}
+    max_retries = 6
+    backoff = 1.0
+    last_err = None
 
-    if r.status_code >= 400:
-        body = (r.text or "").strip().replace("\n", " ")
-        body = body[:2000]
-        raise requests.HTTPError(f"{r.status_code} {r.reason}: {body}", response=r)
+    for _ in range(max_retries):
+        try:
+            r = session.get(url, params=params, timeout=25)
 
-    data = r.json()
-    features = data.get("features", []) or []
+            if r.status_code in retry_statuses:
+                body = (r.text or "").strip().replace("\n", " ")
+                last_err = f"{r.status_code} {r.reason}: {body[:300]}"
+                time.sleep(backoff)
+                backoff *= 2
+                continue
 
-    rows = []
-    for f in features:
-        row = extract_company_info(f)
-        if row:
-            rows.append(row)
-    return rows
+            if r.status_code >= 400:
+                body = (r.text or "").strip().replace("\n", " ")
+                raise requests.HTTPError(f"{r.status_code} {r.reason}: {body[:2000]}", response=r)
+
+            data = r.json()
+            features = data.get("features", []) or []
+
+            rows = []
+            for f in features:
+                row = extract_company_info(f)
+                if row:
+                    rows.append(row)
+            return rows
+
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_err = str(e)
+            time.sleep(backoff)
+            backoff *= 2
+
+    raise requests.HTTPError(f"retry_failed: {last_err}")
 
 
-def fetch_all(bbox: str) -> List[dict]:
+def fetch_all(bbox: str):
+    """
+    Возвращает (rows, error_text).
+    Если в середине падает сеть/504/429 и т.п. — НЕ теряем уже собранные строки.
+    Также: если пришло меньше RESULTS_PER_PAGE — считаем это последней страницей и завершаем без лишнего запроса.
+    """
     all_rows: List[dict] = []
     seen_ids = set()
+    error_text = ""
 
     with requests.Session() as session:
         skip = 0
         while skip <= MAX_SKIP:
-            rows = ymaps_search_page(session, bbox=bbox, skip=skip)
+            try:
+                rows = ymaps_search_page(session, bbox=bbox, skip=skip)
+            except Exception as e:
+                error_text = str(e)
+                break
+
             if not rows:
                 break
 
@@ -227,10 +259,14 @@ def fetch_all(bbox: str) -> List[dict]:
             if LOG_EVERY_PAGE:
                 print(f"skip={skip}: +{len(rows)} (total={len(all_rows)})")
 
+            # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: неполная страница => это конец выдачи
+            if len(rows) < RESULTS_PER_PAGE:
+                break
+
             skip += RESULTS_PER_PAGE
             time.sleep(SLEEP_SEC)
 
-    return all_rows
+    return all_rows, error_text
 
 
 # ===================== EXCEL =====================
@@ -309,11 +345,8 @@ def save_to_excel(companies: List[dict], out_path: str, request_meta: Dict[str, 
     ws_req = wb.create_sheet("Запрос")
     write_request_sheet(ws_req, request_meta)
 
-    # Чтобы при открытии Excel показывал 1-й лист "Организации"
-    wb.active = 0  # индекс 0 = первый лист [web:320]
-
+    wb.active = 0
     wb.save(out_path)
-
 
 
 # ===================== MAIN =====================
@@ -325,7 +358,6 @@ def main():
     out_name = f"{OUT_PREFIX}_{now_str_for_filename()}.xlsx"
     out_path = f"{OUT_DIR.rstrip('/\\\\')}/{out_name}"
 
-    # 1-я строка: файл + параметры
     print(f"{out_name} | text='{TEXT}' | center={CENTER_LON},{CENTER_LAT} | diameter_km={DIAMETER_KM} | lang={LANG}")
 
     request_meta = {
@@ -341,19 +373,11 @@ def main():
         "sleep_sec": SLEEP_SEC,
     }
 
-    try:
-        companies = fetch_all(bbox=bbox)
-    except requests.HTTPError as e:
-        print(f"ERROR: {e}")
-        # даже при ошибке сохраним файл с листом "Запрос", чтобы было понятно что запускалось
-        save_to_excel([], out_path, request_meta | {"error": str(e)})
-        print("saved (with error meta)")
-        return
-    except Exception as e:
-        print(f"ERROR: {e}")
-        save_to_excel([], out_path, request_meta | {"error": str(e)})
-        print("saved (with error meta)")
-        return
+    companies, err = fetch_all(bbox=bbox)
+
+    if err:
+        print(f"ERROR: {err}")
+        request_meta["error"] = err
 
     print(f"done: rows={len(companies)}")
 

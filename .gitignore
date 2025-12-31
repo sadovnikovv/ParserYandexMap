@@ -8,4 +8,5 @@ out_*.xlsx
 .idea/dataSources/
 .idea/dataSources.local.xml
 .env
+.debug_extra/
 

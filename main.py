@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
 Yandex Maps (API Поиска по организациям) -> Excel (1 файл на запуск).
 
@@ -14,6 +15,7 @@ Yandex Maps (API Поиска по организациям) -> Excel (1 фай�
 import json
 import math
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -23,15 +25,12 @@ import requests
 import openpyxl
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, PatternFill, Alignment
-
 from dotenv import load_dotenv
-
 
 # ===================== ЗАГРУЗКА .env =====================
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env", override=True)
-
 
 # ===================== ШАПКА: МЕНЯЕТЕ ТОЛЬКО ЭТО =====================
 
@@ -42,33 +41,51 @@ if not API_KEY:
 TEXT = "резка металла по размерам ленточнопил"
 LANG = "ru_RU"
 
-# Центр области поиска (Москва)
-CENTER_LON = 37.6173   # долгота
-CENTER_LAT = 55.7558   # широта
+CENTER_LON = 37.6173
+CENTER_LAT = 55.7558
 
-# Диаметр области в км (например 17.2 = радиус 8.6 км)
 DIAMETER_KM = 40
 
-# Пагинация/ограничения API
-RESULTS_PER_PAGE = 50     # max 50
-MAX_SKIP = 1000           # max 1000
+RESULTS_PER_PAGE = 50
+MAX_SKIP = 1000
 SLEEP_SEC = 0.25
 
-# Куда сохранять
-OUT_DIR = "."             # например r"C:\Users\user\Desktop"
-OUT_PREFIX = "out"        # будет out_YYYY-MM-DD_HH-MM-SS.xlsx
+OUT_DIR = "."
+OUT_PREFIX = "out"
 
-# Лаконичный режим логов
-LOG_EVERY_PAGE = True     # True: печатать страницы; False: только старт/итог
+LOG_EVERY_PAGE = True
 
-# Сколько значений раскладывать по отдельным колонкам
 MAX_PHONES = 3
 MAX_EMAILS = 3
 MAX_FAXES = 3
 
-# В таблице показываем только 1..3 категории (остальные — в "Категории (прочие)")
 MAX_CATEGORIES_MAIN = 3
 
+# ===================== ДОП. ОБОГАЩЕНИЕ (ОТКЛЮЧАЕМОЕ) =====================
+
+# 1) Официальный доп. запрос по uri (документированный параметр запроса).
+ENABLE_URI_REQUERY = True
+
+# 2) Неофициальное обогащение из web-карточки (может перестать работать в любой момент).
+# Если True — всегда делаем web и заполняем рейтинг/отзывы (и debug).
+ENABLE_UNOFFICIAL_ENRICH = False
+
+# 3) ВАЖНО: fallback для рейтинга.
+# Если включен, то даже при ENABLE_UNOFFICIAL_ENRICH=False:
+# когда uri-requery не дал рейтинг/отзывы, скрипт автоматически доберет их с web-карточки.
+ENABLE_WEB_FALLBACK_FOR_RATING = True
+
+# Детализированный debug-вывод/дампы (для проверки, что реально приходит)
+EXTRA_DEBUG = True
+
+EXTRA_MAX_ITEMS = 30
+EXTRA_DEBUG_DIR = "debug_extra"
+
+EXTRA_SAVE_URI_JSON = True
+EXTRA_SAVE_URI_MATCHES = True
+
+EXTRA_SAVE_WEB_EXTRACT_JSON = True
+EXTRA_SAVE_WEB_HTML = False
 
 # ===================== ВСПОМОГАТЕЛЬНОЕ =====================
 
@@ -81,15 +98,10 @@ def now_iso_local() -> str:
 
 
 def bbox_from_center_diameter_km(center_lon: float, center_lat: float, diameter_km: float) -> str:
-    """
-    bbox вокруг центра по диаметру в км.
-    Возвращает: "lon1,lat1~lon2,lat2" (сначала долгота, потом широта).
-    """
     if diameter_km <= 0:
         raise ValueError("DIAMETER_KM должен быть > 0")
 
     radius_km = diameter_km / 2.0
-
     km_per_deg_lat = 110.574
     km_per_deg_lon = 111.320 * math.cos(math.radians(center_lat))
     if abs(km_per_deg_lon) < 1e-9:
@@ -187,13 +199,75 @@ def bool_to_ru(v: Any) -> str:
     return safe_str(v)
 
 
+def ensure_debug_dir() -> Path:
+    d = BASE_DIR / EXTRA_DEBUG_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def dump_debug_json(filename: str, data: Any):
+    if not EXTRA_DEBUG:
+        return
+    d = ensure_debug_dir()
+    p = d / filename
+    try:
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def dump_debug_text(filename: str, text: str):
+    if not EXTRA_DEBUG:
+        return
+    d = ensure_debug_dir()
+    p = d / filename
+    try:
+        p.write_text(text or "", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def short_keys(dct: Any, limit: int = 60) -> str:
+    if not isinstance(dct, dict):
+        return ""
+    keys = list(dct.keys())
+    if len(keys) > limit:
+        keys = keys[:limit] + ["..."]
+    return ", ".join(map(str, keys))
+
+
+def oid_from_uri(uri: str) -> str:
+    m = re.search(r"[?&]oid=(\d+)", safe_str(uri))
+    return m.group(1) if m else ""
+
+
+def find_interest_fields(obj: Any) -> List[Dict[str, Any]]:
+    """
+    Диагностика: рекурсивно ищет любые ключи, где в названии встречается rating/review.
+    """
+    out: List[Dict[str, Any]] = []
+    patterns = ("rating", "review")
+
+    def walk(x: Any, path: List[str]):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                k_str = safe_str(k)
+                new_path = path + [k_str]
+                lk = k_str.lower()
+                if any(p in lk for p in patterns):
+                    out.append({"path": ".".join(new_path), "value": v})
+                walk(v, new_path)
+        elif isinstance(x, list):
+            for i, it in enumerate(x):
+                walk(it, path + [f"[{i}]"])
+
+    walk(obj, [])
+    return out
+
+
 # ===================== ПАРСИНГ ОТВЕТА =====================
 
 def parse_contacts(meta: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
-    """
-    Возвращает: phones, emails, faxes.
-    В API обычно CompanyMetaData.Phones: [{type, formatted}, ...]
-    """
     phones: List[str] = []
     emails: List[str] = []
     faxes: List[str] = []
@@ -229,10 +303,6 @@ def parse_categories(meta: Dict[str, Any]) -> List[str]:
 
 
 def parse_address(meta: Dict[str, Any], props: Dict[str, Any]) -> Tuple[str, str]:
-    """
-    Возвращает (address, postal_code).
-    address: стараемся сделать один “лучший” адрес без дублей.
-    """
     address = safe_str(meta.get("address", ""))
     addr_obj = meta.get("Address") or {}
     postal = ""
@@ -240,11 +310,9 @@ def parse_address(meta: Dict[str, Any], props: Dict[str, Any]) -> Tuple[str, str
     if isinstance(addr_obj, dict):
         postal = safe_str(addr_obj.get("postal_code", ""))
         formatted = safe_str(addr_obj.get("formatted", ""))
-        # Если meta.address пустой — возьмём formatted
         if not address and formatted:
             address = formatted
 
-    # Если и так пусто — попробуем description из properties
     if not address:
         address = safe_str(props.get("description", ""))
 
@@ -252,12 +320,6 @@ def parse_address(meta: Dict[str, Any], props: Dict[str, Any]) -> Tuple[str, str
 
 
 def parse_hours(meta: Dict[str, Any]) -> str:
-    """
-    Возвращает одну строку режима работы.
-    Приоритет:
-    1) Hours.text (как в примерах у вас)
-    2) раскрытие из Availabilities
-    """
     hours = meta.get("Hours") or {}
     if not isinstance(hours, dict):
         return ""
@@ -299,6 +361,7 @@ def parse_hours(meta: Dict[str, Any]) -> str:
                 to = normalize_hhmm(safe_str(inter.get("to", "")))
                 if fr and to:
                     segs.append(f"{fr}–{to}")
+
         time_str = ", ".join(segs) if segs else ""
 
         if a.get("Everyday") is True:
@@ -309,8 +372,8 @@ def parse_hours(meta: Dict[str, Any]) -> str:
         for k, ru in day_map.items():
             if a.get(k) is True:
                 days.append(ru)
-        days_str = days_ranges_ru(days)
 
+        days_str = days_ranges_ru(days)
         if days_str and time_str:
             parts.append(f"{days_str} {time_str}")
         elif days_str:
@@ -322,10 +385,6 @@ def parse_hours(meta: Dict[str, Any]) -> str:
 
 
 def parse_features(meta: Dict[str, Any]) -> str:
-    """
-    Делает одну читаемую строку “Особенности”.
-    True/False превращаем в Есть/Нет.
-    """
     feats = meta.get("Features") or []
     if not isinstance(feats, list) or not feats:
         return ""
@@ -335,15 +394,13 @@ def parse_features(meta: Dict[str, Any]) -> str:
         if not isinstance(f, dict):
             continue
 
-        # В идеале name уже русское (как у вас в примере).
         name = safe_str(f.get("name", "")) or safe_str(f.get("id", ""))
         value = f.get("value")
-
         value_str = ""
+
         if isinstance(value, bool):
             value_str = bool_to_ru(value)
         elif isinstance(value, list):
-            # список значений (часто dict с name)
             names = []
             for x in value:
                 if isinstance(x, dict):
@@ -367,21 +424,16 @@ def parse_features(meta: Dict[str, Any]) -> str:
         elif value_str:
             out.append(value_str)
 
-    # На всякий случай заменим “: True/False”, если где-то просочилось
     s = safe_join(out)
     s = s.replace(": True", ": Есть").replace(": False", ": Нет")
     return s
 
 
 def extract_company_info(feature: dict) -> Optional[dict]:
-    """
-    Компактная строка без дублей + raw_json на всякий случай.
-    """
     try:
         props = feature.get("properties", {}) or {}
         meta = props.get("CompanyMetaData", {}) or {}
 
-        # coords
         coords = (feature.get("geometry", {}) or {}).get("coordinates", []) or []
         lon = coords[0] if len(coords) >= 1 else ""
         lat = coords[1] if len(coords) >= 2 else ""
@@ -416,38 +468,26 @@ def extract_company_info(feature: dict) -> Optional[dict]:
             "Долгота": lon,
             "Широта": lat,
             "Сайт": safe_str(meta.get("url", "")),
-
             "Телефон 1": phones_cols[0],
             "Телефон 2": phones_cols[1],
             "Телефон 3": phones_cols[2],
-
             "Email 1": emails_cols[0],
             "Email 2": emails_cols[1],
             "Email 3": emails_cols[2],
-
             "Режим работы": worktime,
-
             "Рейтинг": rating,
             "Количество отзывов": review_count,
-
             "Категория 1": cat_main_cols[0],
             "Категория 2": cat_main_cols[1],
             "Категория 3": cat_main_cols[2],
-
             "Особенности": features_str,
-
             "uri": safe_str(props.get("uri", "")),
-
-            # В конце: факсы (редко нужны)
             "Факс 1": faxes_cols[0],
             "Факс 2": faxes_cols[1],
             "Факс 3": faxes_cols[2],
-
-            # В самом конце: “прочие категории” и raw
             "Категории (прочие)": cat_extra_str,
             "raw_json": json.dumps(feature, ensure_ascii=False),
         }
-
         return row
     except Exception:
         return None
@@ -455,18 +495,8 @@ def extract_company_info(feature: dict) -> Optional[dict]:
 
 # ===================== API =====================
 
-def ymaps_search_page(session: requests.Session, bbox: str, skip: int) -> List[dict]:
+def ymaps_get_json(session: requests.Session, params: Dict[str, Any]) -> Dict[str, Any]:
     url = "https://search-maps.yandex.ru/v1/"
-    params = {
-        "apikey": API_KEY,
-        "text": TEXT,
-        "lang": LANG,
-        "type": "biz",
-        "bbox": bbox,
-        "rspn": 1,
-        "results": RESULTS_PER_PAGE,
-        "skip": skip,
-    }
 
     retry_statuses = {429, 500, 502, 503, 504}
     max_retries = 6
@@ -488,15 +518,7 @@ def ymaps_search_page(session: requests.Session, bbox: str, skip: int) -> List[d
                 body = (r.text or "").strip().replace("\n", " ")
                 raise requests.HTTPError(f"{r.status_code} {r.reason}: {body[:2000]}", response=r)
 
-            data = r.json()
-            features = data.get("features", []) or []
-
-            rows = []
-            for f in features:
-                row = extract_company_info(f)
-                if row:
-                    rows.append(row)
-            return rows
+            return r.json()
 
         except (requests.Timeout, requests.ConnectionError) as e:
             last_err = str(e)
@@ -506,18 +528,190 @@ def ymaps_search_page(session: requests.Session, bbox: str, skip: int) -> List[d
     raise requests.HTTPError(f"retry_failed: {last_err}")
 
 
+def ymaps_search_page(session: requests.Session, bbox: str, skip: int) -> List[dict]:
+    params = {
+        "apikey": API_KEY,
+        "text": TEXT,
+        "lang": LANG,
+        "type": "biz",
+        "bbox": bbox,
+        "rspn": 1,
+        "results": RESULTS_PER_PAGE,
+        "skip": skip,
+    }
+
+    data = ymaps_get_json(session, params=params)
+    features = data.get("features", []) or []
+
+    rows = []
+    for f in features:
+        row = extract_company_info(f)
+        if row:
+            rows.append(row)
+    return rows
+
+
+def ymaps_fetch_by_uri(session: requests.Session, uri: str) -> Dict[str, Any]:
+    params = {
+        "apikey": API_KEY,
+        "uri": safe_str(uri),
+        "lang": LANG,
+        "type": "biz",
+        "results": 1,
+        "skip": 0,
+    }
+    return ymaps_get_json(session, params=params)
+
+
+def web_fetch_org_page(session: requests.Session, oid: str) -> str:
+    url = f"https://yandex.ru/maps/org/{oid}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    }
+    r = session.get(url, headers=headers, timeout=25)
+    return r.text or ""
+
+
+def extract_jsonld_blocks(html: str) -> List[Any]:
+    blocks = re.findall(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html or "",
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    out = []
+    for b in blocks:
+        b = (b or "").strip()
+        if not b:
+            continue
+        try:
+            out.append(json.loads(b))
+        except Exception:
+            continue
+    return out
+
+
+def walk_find(obj: Any, key: str) -> List[Any]:
+    found = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == key:
+                found.append(v)
+            found.extend(walk_find(v, key))
+    elif isinstance(obj, list):
+        for it in obj:
+            found.extend(walk_find(it, key))
+    return found
+
+
+def parse_web_jsonld(jsonlds: List[Any]) -> Dict[str, Any]:
+    rating_value = ""
+    rating_count = ""
+    review_count = ""
+    same_as: List[str] = []
+
+    for o in jsonlds:
+        for agg in walk_find(o, "aggregateRating"):
+            if isinstance(agg, dict):
+                if rating_value == "" and agg.get("ratingValue") is not None:
+                    rating_value = safe_str(agg.get("ratingValue"))
+                if rating_count == "" and agg.get("ratingCount") is not None:
+                    rating_count = safe_str(agg.get("ratingCount"))
+                if review_count == "" and agg.get("reviewCount") is not None:
+                    review_count = safe_str(agg.get("reviewCount"))
+
+        for sa in walk_find(o, "sameAs"):
+            if isinstance(sa, str):
+                same_as.append(sa)
+            elif isinstance(sa, list):
+                for it in sa:
+                    if isinstance(it, str):
+                        same_as.append(it)
+
+    same_as = dedup_keep_order([safe_str(x) for x in same_as if safe_str(x)])
+
+    return {
+        "ratingValue": rating_value,
+        "ratingCount": rating_count,
+        "reviewCount": review_count,
+        "sameAs": same_as,
+    }
+
+
+def parse_web_microdata(html: str) -> Dict[str, Any]:
+    def find_meta(prop: str) -> str:
+        m = re.search(
+            rf'itemProp=["\']{re.escape(prop)}["\'][^>]*content=["\']([^"\']+)["\']',
+            html or "",
+            flags=re.IGNORECASE,
+        )
+        return safe_str(m.group(1)) if m else ""
+
+    return {
+        "ratingValue": find_meta("ratingValue"),
+        "ratingCount": find_meta("ratingCount"),
+        "reviewCount": find_meta("reviewCount"),
+    }
+
+
+def enrich_rating_from_web(session: requests.Session, oid: str) -> Dict[str, str]:
+    """
+    Возвращает {"rating": "...", "review_count": "...", "rating_count": "..."} (все строки).
+    """
+    html = web_fetch_org_page(session, oid)
+
+    if EXTRA_SAVE_WEB_HTML:
+        dump_debug_text(f"web_{oid}.html", html)
+
+    jsonlds = extract_jsonld_blocks(html)
+    parsed_jsonld = parse_web_jsonld(jsonlds)
+    parsed_micro = parse_web_microdata(html)
+
+    rating_value = parsed_jsonld.get("ratingValue") or parsed_micro.get("ratingValue") or ""
+    review_count = parsed_jsonld.get("reviewCount") or parsed_micro.get("reviewCount") or ""
+    rating_count = parsed_jsonld.get("ratingCount") or parsed_micro.get("ratingCount") or ""
+
+    if EXTRA_SAVE_WEB_EXTRACT_JSON:
+        dump_debug_json(
+            f"web_{oid}_extract.json",
+            {
+                "jsonld_blocks_count": len(jsonlds),
+                "parsed_jsonld": parsed_jsonld,
+                "parsed_microdata": parsed_micro,
+                "final": {
+                    "ratingValue": rating_value,
+                    "reviewCount": review_count,
+                    "ratingCount": rating_count,
+                },
+            },
+        )
+
+    if EXTRA_DEBUG:
+        print(
+            f"  web: jsonld_blocks={len(jsonlds)} "
+            f"ratingValue={rating_value} reviewCount={review_count} ratingCount={rating_count}"
+        )
+
+    return {
+        "rating": safe_str(rating_value),
+        "review_count": safe_str(review_count),
+        "rating_count": safe_str(rating_count),
+    }
+
+
 def fetch_all(bbox: str):
-    """
-    Возвращает (rows, error_text).
-    Не теряем уже собранные строки при ошибке.
-    Неполная страница => конец выдачи.
-    """
     all_rows: List[dict] = []
     seen_ids = set()
     error_text = ""
 
+    uri_done = 0
+    web_done = 0
+
     with requests.Session() as session:
         skip = 0
+
         while skip <= MAX_SKIP:
             try:
                 rows = ymaps_search_page(session, bbox=bbox, skip=skip)
@@ -534,6 +728,80 @@ def fetch_all(bbox: str):
                     if org_id in seen_ids:
                         continue
                     seen_ids.add(org_id)
+
+                uri = safe_str(row.get("uri", ""))
+                oid = oid_from_uri(uri) or safe_str(org_id)
+
+                if (ENABLE_URI_REQUERY or ENABLE_UNOFFICIAL_ENRICH or ENABLE_WEB_FALLBACK_FOR_RATING) and EXTRA_DEBUG:
+                    print(f"extra: ID={org_id} uri={uri}")
+
+                # --------- 1) Официальный requery по uri (если включен) ---------
+                if ENABLE_URI_REQUERY and uri_done < EXTRA_MAX_ITEMS:
+                    if uri:
+                        try:
+                            j2 = ymaps_fetch_by_uri(session, uri)
+
+                            if EXTRA_SAVE_URI_JSON:
+                                dump_debug_json(f"uri_{org_id or oid}.json", j2)
+
+                            feats2 = j2.get("features", []) or []
+                            f2 = feats2[0] if isinstance(feats2, list) and feats2 else None
+                            props2 = (f2.get("properties", {}) or {}) if isinstance(f2, dict) else {}
+                            meta2 = (props2.get("CompanyMetaData", {}) or {}) if isinstance(props2, dict) else {}
+
+                            if EXTRA_DEBUG:
+                                print(f"  uri-requery: features={len(feats2)} CompanyMetaData keys=[{short_keys(meta2)}]")
+
+                            if EXTRA_SAVE_URI_MATCHES:
+                                matches = find_interest_fields(j2)
+                                dump_debug_json(f"uri_{org_id or oid}_matches.json",
+                                                {"matches_count": len(matches), "matches": matches})
+                                if EXTRA_DEBUG:
+                                    print(f"  uri-requery: matches(rating/review)={len(matches)} (saved to debug)")
+
+                            # Если вдруг появилось — заполняем существующие колонки
+                            if not safe_str(row.get("Рейтинг", "")) and meta2.get("rating") is not None:
+                                row["Рейтинг"] = safe_str(meta2.get("rating"))
+                            if not safe_str(row.get("Количество отзывов", "")) and meta2.get("review_count") is not None:
+                                row["Количество отзывов"] = safe_str(meta2.get("review_count"))
+
+                            uri_done += 1
+                            time.sleep(SLEEP_SEC)
+                        except Exception as e:
+                            if EXTRA_DEBUG:
+                                print(f"  uri-requery: ERROR: {e}")
+
+                # --------- 2) Web enrich (если включен явно) ---------
+                if ENABLE_UNOFFICIAL_ENRICH and web_done < EXTRA_MAX_ITEMS:
+                    if oid.isdigit():
+                        try:
+                            w = enrich_rating_from_web(session, oid)
+                            if not safe_str(row.get("Рейтинг", "")) and w["rating"]:
+                                row["Рейтинг"] = w["rating"]
+                            if not safe_str(row.get("Количество отзывов", "")) and w["review_count"]:
+                                row["Количество отзывов"] = w["review_count"]
+                            web_done += 1
+                        except Exception as e:
+                            if EXTRA_DEBUG:
+                                print(f"  web: ERROR: {e}")
+
+                # --------- 3) Fallback: если после uri нет рейтинга/отзывов — добираем с web ---------
+                if ENABLE_WEB_FALLBACK_FOR_RATING and not ENABLE_UNOFFICIAL_ENRICH and web_done < EXTRA_MAX_ITEMS:
+                    need_rating = not safe_str(row.get("Рейтинг", ""))
+                    need_reviews = not safe_str(row.get("Количество отзывов", ""))
+
+                    if (need_rating or need_reviews) and oid.isdigit():
+                        try:
+                            w = enrich_rating_from_web(session, oid)
+                            if need_rating and w["rating"]:
+                                row["Рейтинг"] = w["rating"]
+                            if need_reviews and w["review_count"]:
+                                row["Количество отзывов"] = w["review_count"]
+                            web_done += 1
+                        except Exception as e:
+                            if EXTRA_DEBUG:
+                                print(f"  web-fallback: ERROR: {e}")
+
                 all_rows.append(row)
 
             if LOG_EVERY_PAGE:
@@ -572,7 +840,6 @@ HEADERS = [
     "Категория 3",
     "Особенности",
     "uri",
-    # “редкое/служебное” в конце:
     "Факс 1",
     "Факс 2",
     "Факс 3",
@@ -587,6 +854,7 @@ def write_request_sheet(ws, request_meta: Dict[str, Any]):
 
     header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF")
+
     for cell in ws[1]:
         cell.fill = header_fill
         cell.font = header_font
@@ -603,11 +871,11 @@ def write_request_sheet(ws, request_meta: Dict[str, Any]):
 
 def write_companies_sheet(ws, companies: List[dict]):
     ws.title = "Организации"
-
     ws.append(HEADERS)
 
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF")
+
     for cell in ws[1]:
         cell.fill = header_fill
         cell.font = header_font
@@ -617,7 +885,6 @@ def write_companies_sheet(ws, companies: List[dict]):
         for c in companies:
             ws.append([c.get(h, "") for h in HEADERS])
 
-    # Выравнивание данных
     raw_col_idx = None
     for i, h in enumerate(HEADERS, start=1):
         if h == "raw_json":
@@ -635,7 +902,6 @@ def write_companies_sheet(ws, companies: List[dict]):
             else:
                 cell.alignment = align_wrap
 
-    # Автоширина (ограниченно)
     for col_num, header in enumerate(HEADERS, 1):
         col_letter = get_column_letter(col_num)
         max_len = len(header) + 2
@@ -644,6 +910,7 @@ def write_companies_sheet(ws, companies: List[dict]):
             cell = row[0]
             if cell.value is None:
                 continue
+
             s = str(cell.value)
             if header == "raw_json":
                 max_len = max(max_len, min(len(s), 60))
@@ -675,7 +942,6 @@ def save_to_excel(companies: List[dict], out_path: str, request_meta: Dict[str, 
 def main():
     request_time = now_iso_local()
     bbox = bbox_from_center_diameter_km(CENTER_LON, CENTER_LAT, DIAMETER_KM)
-
     out_name = f"{OUT_PREFIX}_{now_str_for_filename()}.xlsx"
     out_path = os.path.join(OUT_DIR, out_name)
 
@@ -696,6 +962,9 @@ def main():
         "max_emails": MAX_EMAILS,
         "max_faxes": MAX_FAXES,
         "max_categories_main": MAX_CATEGORIES_MAIN,
+        "ENABLE_URI_REQUERY": ENABLE_URI_REQUERY,
+        "ENABLE_UNOFFICIAL_ENRICH": ENABLE_UNOFFICIAL_ENRICH,
+        "ENABLE_WEB_FALLBACK_FOR_RATING": ENABLE_WEB_FALLBACK_FOR_RATING,
     }
 
     companies, err = fetch_all(bbox=bbox)
@@ -705,7 +974,6 @@ def main():
         request_meta["error"] = err
 
     print(f"done: rows={len(companies)}")
-
     save_to_excel(companies, out_path, request_meta)
     print("saved")
 

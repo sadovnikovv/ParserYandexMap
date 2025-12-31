@@ -1,7 +1,3 @@
-
-# generated excel outputs
-out_*.xlsx
-~$out_*.xlsx
 .idea/workspace.xml
 .idea/tasks.xml
 .idea/shelf/
@@ -9,4 +5,28 @@ out_*.xlsx
 .idea/dataSources.local.xml
 .env
 .debug_extra/
+
+
+# venv / python cache
+.venv/
+__pycache__/
+*.pyc
+
+# runtime/debug artifacts
+ChromeProfile9222/
+debug_extra/
+
+# inputs (локальные сохранённые html)
+html/
+html/*.html
+!html/.gitkeep
+
+# outputs
+results/
+results/*
+!results/.gitkeep
+
+# Excel outputs in root (на случай старых запусков)
+out_*.xlsx
+~$out_*.xlsx
 

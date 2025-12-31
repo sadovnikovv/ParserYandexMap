@@ -76,7 +76,7 @@ ENABLE_UNOFFICIAL_ENRICH = False
 ENABLE_WEB_FALLBACK_FOR_RATING = True
 
 # Детализированный debug-вывод/дампы (для проверки, что реально приходит)
-EXTRA_DEBUG = True
+EXTRA_DEBUG = False
 
 EXTRA_MAX_ITEMS = 30
 EXTRA_DEBUG_DIR = "debug_extra"

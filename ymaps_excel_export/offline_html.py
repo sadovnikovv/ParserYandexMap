@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -22,7 +23,6 @@ def iter_offline_html_files(input_path: str) -> List[Path]:
 def offline_html_is_scrolled_to_end(html: str) -> bool:
     """
     Грубая эвристика "страница пролистана до конца".
-    В документе фигурирует маркер add-business-view.
     """
     return 'class="add-business-view"' in (html or "")
 
@@ -33,12 +33,18 @@ def _text(el) -> str:
     return safe_str(el.get_text(" ", strip=True))
 
 
+def _digits(s: str) -> str:
+    s = safe_str(s)
+    return "".join(ch for ch in s if ch.isdigit())
+
+
 def parse_side_panel_items(html: str) -> List[Dict[str, Any]]:
     """
-    Парсит боковой список выдачи Яндекс.Карт из сохранённого HTML.
+    Парсит боковой список выдачи Яндекс.Карт из HTML.
 
-    Ожидаемые элементы:
-      [data-object="search-list-item"][data-id]
+    ВАЖНО:
+    - В выдаче рядом с рейтингом чаще всего отображается именно количество ОЦЕНОК.
+    - Количество отзывов чаще доступно на карточке организации (WEB-enrich).
     """
     soup = BeautifulSoup(html or "", "html.parser")
     nodes = soup.select('[data-object="search-list-item"][data-id]')
@@ -70,10 +76,29 @@ def parse_side_panel_items(html: str) -> List[Dict[str, Any]]:
                     first_by_class_contains(n, "business-rating-badge-viewrating-text")
         rating = _text(rating_el).replace(",", ".")
 
-        cnt_el = first_by_class_contains(n, "business-rating-amount-view")
-        cnt_text = _text(cnt_el)
-        digits = "".join([ch for ch in cnt_text if ch.isdigit()])
-        count = digits if digits else ""
+        # --- Количество оценок / отзывов (если встречается в выдаче)
+        rating_count = ""
+        review_count = ""
+
+        # Часто встречается span business-rating-amount-view _summary:
+        # "598 оценок" / "123 отзыва"
+        for el in n.find_all(True, class_=lambda c: isinstance(c, str) and "business-rating-amount-view" in c):
+            t = _text(el).lower()
+            d = _digits(t)
+            if not d:
+                continue
+            if ("оцен" in t) and (not rating_count):
+                rating_count = d
+            if ("отзыв" in t) and (not review_count):
+                review_count = d
+
+        # Если текст без слов (например "(5725)") — считаем это количеством оценок.
+        if not rating_count:
+            cnt_el = first_by_class_contains(n, "business-rating-amount-view")
+            cnt_text = _text(cnt_el)
+            d = _digits(cnt_text)
+            if d:
+                rating_count = d
 
         href = ""
         a_overlay = n.select_one("a.link-overlay[href]")
@@ -89,7 +114,8 @@ def parse_side_panel_items(html: str) -> List[Dict[str, Any]]:
             "worktime": worktime,
             "category": category,
             "rating": rating,
-            "count": count,
+            "rating_count": rating_count,
+            "review_count": review_count,
             "lon": lon,
             "lat": lat,
             "href": href,
@@ -97,18 +123,20 @@ def parse_side_panel_items(html: str) -> List[Dict[str, Any]]:
 
     # uniq by oid
     seen = set()
-    out = []
+    out: List[Dict[str, Any]] = []
     for it in items:
         oid = safe_str(it.get("oid"))
         if not oid or oid in seen:
             continue
         seen.add(oid)
         out.append(it)
+
     return out
 
 
 def build_companies_from_offline_html(html: str, source_name: str) -> Tuple[List[Company], Dict[str, Any]]:
     warnings: List[str] = []
+
     if not offline_html_is_scrolled_to_end(html):
         msg = "Похоже, выдача НЕ пролистана до конца (нет блока add-business-view)."
         log(f"[OFFLINE_HTML][WARN] {source_name}: {ANSI_YELLOW}{msg}{ANSI_RESET}")
@@ -128,7 +156,8 @@ def build_companies_from_offline_html(html: str, source_name: str) -> Tuple[List
             Широта=safe_str(it.get("lat")),
             Режим_работы=safe_str(it.get("worktime")),
             Рейтинг=safe_str(it.get("rating")),
-            Количество_отзывов=safe_str(it.get("count")),
+            Количество_оценок=safe_str(it.get("rating_count")),    # <-- ВАЖНО: оценки
+            Количество_отзывов=safe_str(it.get("review_count")),    # обычно пусто и добирается WEB-enrich
             Категория_1=safe_str(it.get("category")),
             uri=f"ymapsbm1://org?oid={oid}" if oid else "",
             raw_json=json_dumps_safe({"source": source_name, "item": it}),

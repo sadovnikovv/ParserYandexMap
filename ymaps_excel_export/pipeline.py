@@ -1,3 +1,4 @@
+# pipeline.py
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ def _apply_uri_requery_if_needed(st: Settings, companies: List[Company]) -> Dict
     """
     if not st.ENABLE_URI_REQUERY:
         return {"enabled": False}
+
     if not st.YMAPIKEY:
         return {"enabled": True, "skipped": "YMAPIKEY empty"}
 
@@ -61,6 +63,7 @@ def _apply_uri_requery_if_needed(st: Settings, companies: List[Company]) -> Dict
         uri = safe_str(c.uri)
         if not uri:
             continue
+
         attempted += 1
 
         try:
@@ -82,14 +85,25 @@ def _apply_uri_requery_if_needed(st: Settings, companies: List[Company]) -> Dict
                 changed += 1
 
             for attr in (
-                "Индекс", "Сайт",
-                "Телефон_1", "Телефон_2", "Телефон_3",
-                "Email_1", "Email_2", "Email_3",
+                "Индекс",
+                "Сайт",
+                "Телефон_1",
+                "Телефон_2",
+                "Телефон_3",
+                "Email_1",
+                "Email_2",
+                "Email_3",
                 "Режим_работы",
-                "Рейтинг", "Количество_отзывов",
-                "Категория_1", "Категория_2", "Категория_3",
+                "Рейтинг",
+                "Количество_оценок",     # <-- НОВОЕ
+                "Количество_отзывов",
+                "Категория_1",
+                "Категория_2",
+                "Категория_3",
                 "Особенности",
-                "Факс_1", "Факс_2", "Факс_3",
+                "Факс_1",
+                "Факс_2",
+                "Факс_3",
                 "Категории_прочие",
             ):
                 fill_if_empty(attr)

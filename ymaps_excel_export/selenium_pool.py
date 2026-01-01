@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
 import subprocess
@@ -13,7 +14,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .config import Settings
-from .utils import log
+from .utils import log, safe_str
 
 
 def _debug_port_url(st: Settings, path: str) -> str:
@@ -77,14 +78,17 @@ def selenium_is_blocked(driver: webdriver.Chrome) -> bool:
 
 class SeleniumPool:
     """
-    Selenium-пул, который:
+    Selenium-пул:
     - поднимает Chrome с remote debugging (или аттачится к существующему);
-    - умеет вручную “переждать” капчу (пользователь нажимает Enter);
-    - отдаёт page_source после ожидания блока контактов.
+    - умеет вручную “переждать” капчу;
+    - отдаёт page_source после ожидания блока контактов;
+    - в режиме keep_chrome_open=True не закрывает Chrome (для MODE=SELENIUM).
     """
 
-    def __init__(self, st: Settings):
+    def __init__(self, st: Settings, *, keep_chrome_open: bool = False):
         self.st = st
+        self.keep_chrome_open = keep_chrome_open
+
         self.proc: Optional[subprocess.Popen] = None
         self.started_by_us: bool = False
         self.driver: Optional[webdriver.Chrome] = None
@@ -107,35 +111,79 @@ class SeleniumPool:
         opt = ChromeOptions()
         if self.st.SELENIUM_HEADLESS:
             opt.add_argument("--headless=new")
-        opt.add_experimental_option("debuggerAddress", f"{self.st.DEBUG_HOST}:{self.st.DEBUG_PORT}")
 
+        opt.add_experimental_option("debuggerAddress", f"{self.st.DEBUG_HOST}:{self.st.DEBUG_PORT}")
         self.driver = webdriver.Chrome(options=opt)
+
+    def _safe_input(self, prompt: str) -> None:
+        try:
+            input(prompt)
+        except EOFError:
+            log("[SELENIUM][WARN] input() -> EOFError (нет stdin). Продолжаем без ожидания Enter.")
 
     def get_page_html(self, url: str) -> str:
         self.ensure()
         assert self.driver is not None
+        d = self.driver
 
-        self.driver.get(url)
-        time.sleep(self.st.SELENIUM_PAGE_WAIT_SEC)
-
-        if selenium_is_blocked(self.driver):
-            log(f"[SELENIUM] challenge for url={self.driver.current_url}")
-            input("[SELENIUM] Решите проверку в окне Chrome и нажмите Enter...")
-            time.sleep(1.0)
-            if selenium_is_blocked(self.driver):
-                raise RuntimeError(f"Challenge still present: {self.driver.current_url}")
-
-        # Ждём появления контактов/сайта, иначе React может не дорисовать
+        original_handle = None
         try:
-            WebDriverWait(self.driver, self.st.SELENIUM_WAIT_CONTACTS_SEC).until(
-                lambda d: d.find_elements(By.CSS_SELECTOR, '[itemprop="telephone"], a[itemprop="url"], .orgpage-phones-view')
+            original_handle = d.current_window_handle
+        except Exception:
+            original_handle = None
+
+        opened_new_tab = False
+        if self.st.SELENIUM_OPEN_URL_IN_NEW_TAB:
+            try:
+                d.execute_script("window.open('about:blank', '_blank');")
+                time.sleep(0.2)
+                d.switch_to.window(d.window_handles[-1])
+                opened_new_tab = True
+            except Exception:
+                opened_new_tab = False
+
+        d.get(url)
+        time.sleep(float(self.st.SELENIUM_PAGE_WAIT_SEC))
+
+        if selenium_is_blocked(d):
+            log(f"[SELENIUM] challenge for url={d.current_url}")
+            self._safe_input("[SELENIUM] Решите проверку в окне Chrome и нажмите Enter...")
+            time.sleep(1.0)
+            if selenium_is_blocked(d):
+                raise RuntimeError(f"Challenge still present: {d.current_url}")
+
+        try:
+            WebDriverWait(d, int(self.st.SELENIUM_WAIT_CONTACTS_SEC)).until(
+                lambda x: x.find_elements(
+                    By.CSS_SELECTOR,
+                    '[itemprop="telephone"], a[itemprop="url"], .orgpage-phones-view',
+                )
             )
         except Exception:
             pass
 
-        return self.driver.page_source or ""
+        html = d.page_source or ""
+
+        # Возврат обратно, чтобы не ломать вкладку Я.Карт
+        if opened_new_tab and self.st.SELENIUM_RETURN_TO_ORIGINAL_TAB and original_handle:
+            try:
+                d.close()
+            except Exception:
+                pass
+            try:
+                d.switch_to.window(original_handle)
+            except Exception:
+                pass
+
+        return html
 
     def close(self) -> None:
+        # В SELENIUM режиме Chrome не закрываем (пользователь закрывает сам)
+        if self.keep_chrome_open:
+            self.driver = None
+            self.proc = None
+            return
+
         if self.driver:
             try:
                 self.driver.quit()
@@ -153,5 +201,6 @@ class SeleniumPool:
                 except Exception:
                     pass
             self.proc = None
+
         elif (not self.started_by_us) and self.st.CLOSE_EXISTING_DEBUG_CHROME:
             log("[CHROME][WARN] CLOSE_EXISTING_DEBUG_CHROME=True, но безопасно закрыть чужой Chrome нельзя.")

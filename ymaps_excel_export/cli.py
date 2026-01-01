@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
 import sys
@@ -21,6 +22,8 @@ def main() -> None:
     if err:
         log(f"ERROR: {err}")
         sys.exit(1)
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":

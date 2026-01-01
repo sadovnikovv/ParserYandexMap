@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,6 +9,7 @@ from .config import Settings
 from .excel_writer import save_to_excel
 from .models import Company, RunResult
 from .offline_html import read_offline_input
+from .selenium_manual_maps import collect_companies_from_selenium_live_maps
 from .selenium_pool import SeleniumPool
 from .utils import bbox_from_center_diameter_km, now_iso_local, now_str_for_filename, safe_str
 from .web_enrich import enrich_companies_web
@@ -46,7 +48,6 @@ def _apply_uri_requery_if_needed(st: Settings, companies: List[Company]) -> Dict
     """
     if not st.ENABLE_URI_REQUERY:
         return {"enabled": False}
-
     if not st.YMAPIKEY:
         return {"enabled": True, "skipped": "YMAPIKEY empty"}
 
@@ -60,8 +61,8 @@ def _apply_uri_requery_if_needed(st: Settings, companies: List[Company]) -> Dict
         uri = safe_str(c.uri)
         if not uri:
             continue
-
         attempted += 1
+
         try:
             j = fetch_by_uri(st, uri=uri)
             feats = j.get("features") or []
@@ -109,12 +110,22 @@ def run(st: Settings) -> RunResult:
     request_meta = _build_request_meta(st)
     companies: List[Company] = []
 
+    # --- Источник данных (MODE) ---
     if st.MODE == "ONLINEAPI":
         bbox = bbox_from_center_diameter_km(st.CENTER_LON, st.CENTER_LAT, st.DIAMETER_KM)
         request_meta["bbox"] = bbox
 
         companies, api_meta, err = search_bbox(st, bbox=bbox)
         request_meta["api_meta"] = api_meta
+
+        # ВАЖНО: НЕ выходим. Сохраняем то, что успели собрать.
+        if err:
+            request_meta["error"] = err
+            request_meta["partial"] = True
+
+    elif st.MODE == "OFFLINEHTML":
+        companies, offline_meta, err = read_offline_input(st.OFFLINE_HTML_INPUT)
+        request_meta["offline_meta"] = offline_meta
 
         if err:
             request_meta["error"] = err
@@ -123,9 +134,9 @@ def run(st: Settings) -> RunResult:
             save_to_excel(st, [], outpath, request_meta)
             return RunResult(companies=[], request_meta=request_meta)
 
-    elif st.MODE == "OFFLINEHTML":
-        companies, offline_meta, err = read_offline_input(st.OFFLINE_HTML_INPUT)
-        request_meta["offline_meta"] = offline_meta
+    elif st.MODE == "SELENIUM":
+        companies, selenium_meta, err = collect_companies_from_selenium_live_maps(st)
+        request_meta["selenium_meta"] = selenium_meta
 
         if err:
             request_meta["error"] = err
@@ -141,23 +152,24 @@ def run(st: Settings) -> RunResult:
         save_to_excel(st, [], outpath, request_meta)
         return RunResult(companies=[], request_meta=request_meta)
 
-    # Enrich-цепочка
+    # --- Enrich-цепочка ---
     enrich_stats: Dict[str, Any] = {}
 
     if st.OFFLINE_ENRICH_MODE in ("API", "APIWEB"):
         enrich_stats["uri_requery"] = _apply_uri_requery_if_needed(st, companies)
 
     if st.OFFLINE_ENRICH_MODE in ("WEB", "APIWEB"):
-        pool = SeleniumPool(st)
+        pool = SeleniumPool(st, keep_chrome_open=(st.MODE == "SELENIUM" and st.SELENIUM_KEEP_CHROME_OPEN))
         try:
             enrich_stats["web"] = enrich_companies_web(st, companies, pool)
         finally:
-            pool.close()
+            if not (st.MODE == "SELENIUM" and st.SELENIUM_KEEP_CHROME_OPEN):
+                pool.close()
 
     request_meta["enrich_stats"] = enrich_stats
 
+    # --- Сохраняем Excel в любом случае ---
     save_to_excel(st, companies, outpath, request_meta)
-
     request_meta["saved"] = outpath
     request_meta["rows"] = len(companies)
 

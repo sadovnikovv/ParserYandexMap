@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
-import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,12 +14,11 @@ from .utils import dedup_keep_order, json_dumps_safe, log, pick_n, safe_join, sa
 YMAPS_SEARCH_URL = "https://search-maps.yandex.ru/v1"
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
 
+# Лимит API по параметру skip (см. документацию): выше этого значения API не поддерживает пагинацию.
+API_MAX_SKIP = 1000
+
 
 def _format_rating_1(x: Any) -> str:
-    """
-    Нормализация рейтинга: 1 знак после запятой, как "4,9".
-    Убирает float-хвосты типа 4.900000095367432.
-    """
     s = safe_str(x).replace(",", ".")
     if not s:
         return ""
@@ -31,40 +30,21 @@ def _format_rating_1(x: Any) -> str:
 
 
 def _human_api_hint(status: int, message: str) -> str:
-    """
-    Подсказки пользователю для типовых кодов ошибок API (400/403/429) и 5xx.
-    Коды и примеры формата ошибок описаны в документации. [page:1]
-    """
     msg = (message or "").lower()
-
     if status == 400:
-        return (
-            "400 Bad Request: отсутствует обязательный параметр или неверное значение. "
-            "Проверьте TEXT (не пустой), bbox, results/skip и наличие apikey."
-        )
+        return "400 Bad Request: проверьте TEXT, bbox, results/skip и apikey."
     if status == 403:
-        return (
-            "403 Forbidden: неверный apikey или нет доступа к API. "
-            "Проверьте YM_API_KEY в .env и что ключ имеет доступ к 'Поиск по организациям'."
-        )
+        return "403 Forbidden: проверьте apikey и права."
     if status == 429:
-        return (
-            "429 Too Many Requests: слишком много запросов за короткое время. "
-            "Увеличьте SLEEP_SEC, уменьшите объём/частоту запросов и повторите позже."
-        )
+        return "429 Too Many Requests: увеличьте SLEEP_SEC, повторите позже."
     if status >= 500:
-        return "5xx: ошибка на стороне сервера. Подождите и повторите позже."
-
+        return "5xx: ошибка на стороне сервера. Подождите и повторите."
     if "timeout" in msg:
-        return "Таймаут: проверьте интернет/прокси/VPN и WEB_TIMEOUT_SEC."
-    return "Неизвестная ошибка API. Смотрите status/message и тело ответа."
+        return "Timeout: проверьте сеть и WEB_TIMEOUT_SEC."
+    return "Неизвестная ошибка API."
 
 
 def _raise_api_http_error(r: requests.Response) -> None:
-    """
-    Пытаемся распарсить стандартный JSON ошибки:
-    {"statusCode":403,"error":"Forbidden","message":"Invalid apikey"} [page:1]
-    """
     text = r.text or ""
     status = r.status_code
     error = safe_str(r.reason)
@@ -110,12 +90,18 @@ def _get_json_with_retries(session: requests.Session, *, params: Dict[str, Any],
     raise requests.HTTPError(f"retry_failed: {last_err}")
 
 
+def _normalize_hhmm(t: str) -> str:
+    t = safe_str(t)
+    if len(t) >= 5 and t[2] == ":":
+        return t[:5]
+    return t
+
+
 def _days_ranges_ru(days: List[str]) -> str:
     order = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     idx = sorted(set(order.index(d) for d in days if d in order))
     if not idx:
         return ""
-
     ranges: List[Tuple[int, int]] = []
     start = prev = idx[0]
     for i in idx[1:]:
@@ -125,21 +111,10 @@ def _days_ranges_ru(days: List[str]) -> str:
         ranges.append((start, prev))
         start = prev = i
     ranges.append((start, prev))
-
     parts = []
     for a, b in ranges:
-        if a == b:
-            parts.append(order[a])
-        else:
-            parts.append(f"{order[a]}-{order[b]}")
+        parts.append(order[a] if a == b else f"{order[a]}-{order[b]}")
     return ", ".join(parts)
-
-
-def _normalize_hhmm(t: str) -> str:
-    t = safe_str(t)  # В API иногда приходит "09:00:00"
-    if len(t) >= 5 and t[2] == ":":
-        return t[:5]
-    return t
 
 
 def parse_contacts_meta(meta: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
@@ -269,17 +244,19 @@ def parse_features_meta(meta: Dict[str, Any]) -> str:
 
         name = safe_str(f.get("name") or f.get("id"))
         value = f.get("value")
-        valuestr = ""
 
+        valuestr = ""
         if isinstance(value, bool):
             valuestr = "Да" if value else "Нет"
         elif isinstance(value, list):
-            valuestr = safe_join([
-                safe_str(x.get("name") or x.get("id")) if isinstance(x, dict) else (
-                    "Да" if x is True else "Нет" if x is False else safe_str(x)
-                )
-                for x in value
-            ])
+            valuestr = safe_join(
+                [
+                    safe_str(x.get("name") or x.get("id")) if isinstance(x, dict) else (
+                        "Да" if x is True else "Нет" if x is False else safe_str(x)
+                    )
+                    for x in value
+                ]
+            )
         elif isinstance(value, dict):
             valuestr = safe_str(value.get("name") or value.get("id"))
         else:
@@ -296,9 +273,6 @@ def parse_features_meta(meta: Dict[str, Any]) -> str:
 
 
 def company_from_feature(feature: Dict[str, Any], st: Settings) -> Optional[Company]:
-    """
-    Переводит один feature из API в Company (Excel-строку).
-    """
     try:
         props = feature.get("properties") or {}
         meta = (props.get("CompanyMetaData") or {}) if isinstance(props, dict) else {}
@@ -319,9 +293,9 @@ def company_from_feature(feature: Dict[str, Any], st: Settings) -> Optional[Comp
         faxes_cols = pick_n(faxes, st.MAX_FAXES)
 
         categories = parse_categories_meta(meta)
-        cat_main = categories[:st.MAX_CATEGORIES_MAIN]
+        cat_main = categories[: st.MAX_CATEGORIES_MAIN]
         cat_main_cols = pick_n(cat_main, st.MAX_CATEGORIES_MAIN)
-        cat_extra = categories[st.MAX_CATEGORIES_MAIN:]
+        cat_extra = categories[st.MAX_CATEGORIES_MAIN :]
         cat_extra_str = safe_join(cat_extra)
 
         worktime = parse_hours_meta(meta)
@@ -340,30 +314,39 @@ def company_from_feature(feature: Dict[str, Any], st: Settings) -> Optional[Comp
             Долгота=lon,
             Широта=lat,
             Сайт=safe_str(meta.get("url")),
-
-            Телефон_1=phones_cols[0], Телефон_2=phones_cols[1], Телефон_3=phones_cols[2],
-            Email_1=emails_cols[0], Email_2=emails_cols[1], Email_3=emails_cols[2],
-
+            Телефон_1=phones_cols[0],
+            Телефон_2=phones_cols[1],
+            Телефон_3=phones_cols[2],
+            Email_1=emails_cols[0],
+            Email_2=emails_cols[1],
+            Email_3=emails_cols[2],
             Режим_работы=worktime,
             Рейтинг=rating,
             Количество_отзывов=reviewcount,
-
-            Категория_1=cat_main_cols[0], Категория_2=cat_main_cols[1], Категория_3=cat_main_cols[2],
+            Категория_1=cat_main_cols[0],
+            Категория_2=cat_main_cols[1],
+            Категория_3=cat_main_cols[2],
             Особенности=features_str,
             uri=uri,
-
-            Факс_1=faxes_cols[0], Факс_2=faxes_cols[1], Факс_3=faxes_cols[2],
+            Факс_1=faxes_cols[0],
+            Факс_2=faxes_cols[1],
+            Факс_3=faxes_cols[2],
             Категории_прочие=cat_extra_str,
             raw_json=json_dumps_safe(feature),
         )
-
     except Exception:
         return None
 
 
 def search_bbox(st: Settings, bbox: str) -> Tuple[List[Company], Dict[str, Any], str]:
     """
-    ONLINEAPI: постраничный поиск по bbox.
+    ONLINEAPI: поиск по bbox.
+
+    ВАЖНО ПРО ЛИМИТЫ:
+    - MAX_SKIP здесь трактуется как "лимит по количеству организаций", которые нужно собрать.
+      Если MAX_SKIP=10, то будет собрано максимум 10 организаций.
+      MAX_SKIP=0 означает "без лимита" (но API всё равно ограничен параметром skip).
+    - Если RESULTS_PER_PAGE > MAX_SKIP (и MAX_SKIP>0), то RESULTS_PER_PAGE автоматически уменьшается до MAX_SKIP.
     """
     if not st.YMAPIKEY:
         return [], {}, "YMAPIKEY is empty"
@@ -372,6 +355,19 @@ def search_bbox(st: Settings, bbox: str) -> Tuple[List[Company], Dict[str, Any],
     seen = set()
     err = ""
 
+    max_total = st.MAX_SKIP if st.MAX_SKIP > 0 else 10**9
+    page_size = st.RESULTS_PER_PAGE
+    if st.MAX_SKIP > 0 and page_size > st.MAX_SKIP:
+        page_size = st.MAX_SKIP
+
+    meta: Dict[str, Any] = {
+        "total": 0,
+        "unique": 0,
+        "page_size_effective": page_size,
+        "max_total_effective": (None if st.MAX_SKIP <= 0 else max_total),
+        "api_skip_limit": API_MAX_SKIP,
+    }
+
     params_base = {
         "apikey": st.YMAPIKEY,
         "text": st.TEXT,
@@ -379,13 +375,16 @@ def search_bbox(st: Settings, bbox: str) -> Tuple[List[Company], Dict[str, Any],
         "type": "biz",
         "bbox": bbox,
         "rspn": 1 if st.STRICT_BBOX else 0,
-        "results": st.RESULTS_PER_PAGE,
     }
 
     with requests.Session() as session:
         skip = 0
-        while skip <= st.MAX_SKIP:
+        while skip <= API_MAX_SKIP and len(out) < max_total:
+            remaining = max_total - len(out)
+            cur_results = min(page_size, remaining)
+
             params = dict(params_base)
+            params["results"] = cur_results
             params["skip"] = skip
 
             try:
@@ -395,8 +394,10 @@ def search_bbox(st: Settings, bbox: str) -> Tuple[List[Company], Dict[str, Any],
                 break
 
             features = data.get("features") or []
-            rows: List[Company] = []
+            if not features:
+                break
 
+            rows: List[Company] = []
             for f in features:
                 if not isinstance(f, dict):
                     continue
@@ -413,20 +414,25 @@ def search_bbox(st: Settings, bbox: str) -> Tuple[List[Company], Dict[str, Any],
             if st.VERBOSE:
                 log(f"[API] skip={skip} page_rows={len(rows)} total={len(out)}")
 
-            if len(features) < st.RESULTS_PER_PAGE:
+            # Конец выдачи: API вернул меньше, чем просили (по features, а не по rows после dedup).
+            if len(features) < cur_results:
                 break
 
-            skip += st.RESULTS_PER_PAGE
+            skip += cur_results
             time.sleep(st.SLEEP_SEC)
 
-    meta = {"total": len(out), "unique": len(seen)}
+        if skip > API_MAX_SKIP and len(out) < max_total and not err:
+            # Не делаем это "ошибкой", но фиксируем в meta.
+            meta["stopped_by"] = "api_skip_limit"
+        else:
+            meta["stopped_by"] = "normal"
+
+    meta["total"] = len(out)
+    meta["unique"] = len(seen)
     return out, meta, err
 
 
 def fetch_by_uri(st: Settings, *, uri: str) -> Dict[str, Any]:
-    """
-    uri-requery: точечный запрос по uri (для уточнения/дозаполнения).
-    """
     if not st.YMAPIKEY:
         raise RuntimeError("YMAPIKEY is empty")
 

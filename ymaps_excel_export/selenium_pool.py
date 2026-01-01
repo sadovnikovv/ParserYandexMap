@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from __future__ import annotations
 
 import subprocess
 import time
@@ -11,21 +12,18 @@ from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
-from settings import Settings
-from utils import log
+from .config import Settings
+from .utils import log
 
 
-def debug_port_url(st: Settings, path: str) -> str:
+def _debug_port_url(st: Settings, path: str) -> str:
     return f"http://{st.DEBUG_HOST}:{st.DEBUG_PORT}{path}"
 
 
 def is_debug_chrome_alive(st: Settings, timeout_sec: float = 0.8) -> bool:
     try:
-        r = requests.get(debug_port_url(st, "/json/version"), timeout=timeout_sec)
-        if r.status_code != 200:
-            return False
-        _ = r.json()
-        return True
+        r = requests.get(_debug_port_url(st, "/json/version"), timeout=timeout_sec)
+        return r.status_code == 200
     except Exception:
         return False
 
@@ -46,6 +44,7 @@ def start_debug_chrome(st: Settings) -> subprocess.Popen:
         "--no-default-browser-check",
         "about:blank",
     ]
+
     log(f"[CHROME] starting: {' '.join(args)}")
     return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=False)
 
@@ -63,7 +62,6 @@ def selenium_is_blocked(driver: webdriver.Chrome) -> bool:
     u = (driver.current_url or "").lower()
     if "showcaptcha" in u:
         return True
-
     try:
         if driver.find_elements(By.CSS_SELECTOR, "form[action*='showcaptcha']"):
             return True
@@ -74,18 +72,24 @@ def selenium_is_blocked(driver: webdriver.Chrome) -> bool:
             return True
     except Exception:
         return False
-
     return False
 
 
 class SeleniumPool:
+    """
+    Selenium-пул, который:
+    - поднимает Chrome с remote debugging (или аттачится к существующему);
+    - умеет вручную “переждать” капчу (пользователь нажимает Enter);
+    - отдаёт page_source после ожидания блока контактов.
+    """
+
     def __init__(self, st: Settings):
         self.st = st
         self.proc: Optional[subprocess.Popen] = None
         self.started_by_us: bool = False
         self.driver: Optional[webdriver.Chrome] = None
 
-    def ensure(self):
+    def ensure(self) -> None:
         if self.driver:
             return
 
@@ -115,13 +119,13 @@ class SeleniumPool:
         time.sleep(self.st.SELENIUM_PAGE_WAIT_SEC)
 
         if selenium_is_blocked(self.driver):
-            log(f"[SELENIUM] Detected challenge/block for url={self.driver.current_url}")
+            log(f"[SELENIUM] challenge for url={self.driver.current_url}")
             input("[SELENIUM] Решите проверку в окне Chrome и нажмите Enter...")
             time.sleep(1.0)
             if selenium_is_blocked(self.driver):
                 raise RuntimeError(f"Challenge still present: {self.driver.current_url}")
 
-        # ждём появления контактов (иначе page_source часто пуст по данным)
+        # Ждём появления контактов/сайта, иначе React может не дорисовать
         try:
             WebDriverWait(self.driver, self.st.SELENIUM_WAIT_CONTACTS_SEC).until(
                 lambda d: d.find_elements(By.CSS_SELECTOR, '[itemprop="telephone"], a[itemprop="url"], .orgpage-phones-view')
@@ -131,7 +135,7 @@ class SeleniumPool:
 
         return self.driver.page_source or ""
 
-    def close(self):
+    def close(self) -> None:
         if self.driver:
             try:
                 self.driver.quit()
@@ -150,4 +154,4 @@ class SeleniumPool:
                     pass
             self.proc = None
         elif (not self.started_by_us) and self.st.CLOSE_EXISTING_DEBUG_CHROME:
-            log("[CHROME][WARN] CLOSE_EXISTING_DEBUG_CHROME=True, но безопасно закрыть чужой Chrome нельзя (оставлено выключенным по умолчанию).")
+            log("[CHROME][WARN] CLOSE_EXISTING_DEBUG_CHROME=True, но безопасно закрыть чужой Chrome нельзя.")

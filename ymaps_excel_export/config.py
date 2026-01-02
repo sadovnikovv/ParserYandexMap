@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
+
 """
 file:/C:/Users/user/PycharmProjects/ParserYandexMap_main/ymaps_excel_export/config.py
 
 Настройки проекта.
 
 ВАЖНОЕ ПРАВИЛО:
+
 - В .env допускаются ТОЛЬКО: YM_API_KEY или YMAPIKEY
 - Никаких MODE / таймаутов / лимитов и т.п. в .env хранить нельзя.
 
@@ -43,6 +45,7 @@ def _validate_env_only_api_key(env_path: Path) -> None:
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+
         k = line.split("=", 1)[0].strip()
         if k and k not in allowed:
             bad.append(k)
@@ -62,14 +65,14 @@ class Settings:
     Главная конфигурация.
 
     MODE:
-    - ONLINEAPI   : поиск организаций через Yandex Search Maps API (bbox)
+    - ONLINEAPI : поиск организаций через Yandex Search Maps API (bbox)
     - OFFLINEHTML : парсинг сохранённых html-файлов выдачи
-    - SELENIUM    : живой режим — пользователь открывает Я.Карты в Chrome и жмёт Enter
+    - SELENIUM : живой режим — пользователь открывает Я.Карты в Chrome и жмёт Enter
 
     OFFLINE_ENRICH_MODE:
-    - NONE  : не дозаполнять
-    - API   : дозаполнение через uri-requery (нужен YMAPIKEY)
-    - WEB   : дозаполнение через web-карточку (requests -> selenium fallback)
+    - NONE : не дозаполнять
+    - API : дозаполнение через uri-requery (нужен YMAPIKEY)
+    - WEB : дозаполнение через web-карточку (requests -> selenium fallback)
     - APIWEB: сначала API, потом WEB
     """
 
@@ -92,9 +95,9 @@ class Settings:
     LANG: str = "ru_RU"
     CENTER_LON: float = 37.6173
     CENTER_LAT: float = 55.7558
-    DIAMETER_KM: float = 40.0
+    DIAMETER_KM: float = 1.0
     RESULTS_PER_PAGE: int = 50
-    MAX_SKIP: int = 1000
+    MAX_SKIP: int = 10
     STRICT_BBOX: bool = True
 
     # ---------------------------
@@ -148,15 +151,12 @@ class Settings:
     # ---------------------------
     SELENIUM_START_URL: str = "https://yandex.ru/maps/"
     SELENIUM_WAIT_FOR_ENTER: bool = True
-
     SELENIUM_SCROLL_TO_END: bool = True
     SELENIUM_SCROLL_MAX_SEC: float = 180.0
     SELENIUM_SCROLL_STEP_SEC: float = 0.7
     SELENIUM_SCROLL_STABLE_ROUNDS: int = 8
-
     SELENIUM_LIST_ITEM_CSS: str = '[data-object="search-list-item"][data-id]'
     SELENIUM_END_MARKER_CSS: str = '[class*="add-business-view"]'
-
     SELENIUM_OPEN_URL_IN_NEW_TAB: bool = True
     SELENIUM_RETURN_TO_ORIGINAL_TAB: bool = True
     SELENIUM_KEEP_CHROME_OPEN: bool = True
@@ -191,7 +191,7 @@ class Settings:
                 "Email 3",
                 "Режим работы",
                 "Рейтинг",
-                "Количество оценок",   # <-- НОВАЯ КОЛОНКА
+                "Количество оценок",  # между Рейтинг и Количество отзывов
                 "Количество отзывов",
                 "Категория 1",
                 "Категория 2",
@@ -199,8 +199,8 @@ class Settings:
                 "Особенности",
                 "uri",
                 "Факс 1",
-                "Факс 2",
-                "Факс 3",
+                # "Факс 2",  # УДАЛЕНО из Excel
+                # "Факс 3",  # УДАЛЕНО из Excel
                 "Категории (прочие)",
                 "raw_json",
             ],
@@ -221,10 +221,8 @@ class Settings:
 
         return cls(
             MODE=env_str("MODE", cls.MODE),
-
             OFFLINE_HTML_INPUT=env_str("OFFLINE_HTML_INPUT", cls.OFFLINE_HTML_INPUT),
             OFFLINE_ENRICH_MODE=env_str("OFFLINE_ENRICH_MODE", cls.OFFLINE_ENRICH_MODE),
-
             YMAPIKEY=api_key,
             TEXT=env_str("TEXT", cls.TEXT),
             LANG=env_str("LANG", cls.LANG),
@@ -234,53 +232,67 @@ class Settings:
             RESULTS_PER_PAGE=env_int("RESULTS_PER_PAGE", cls.RESULTS_PER_PAGE),
             MAX_SKIP=env_int("MAX_SKIP", cls.MAX_SKIP),
             STRICT_BBOX=env_bool01("STRICT_BBOX", cls.STRICT_BBOX),
-
             SLEEP_SEC=env_float("SLEEP_SEC", cls.SLEEP_SEC),
-
             ENABLE_URI_REQUERY=env_bool01("ENABLE_URI_REQUERY", cls.ENABLE_URI_REQUERY),
             ENABLE_WEB_FALLBACK_FOR_RATING=env_bool01(
                 "ENABLE_WEB_FALLBACK_FOR_RATING", cls.ENABLE_WEB_FALLBACK_FOR_RATING
             ),
-
             MAX_PHONES=env_int("MAX_PHONES", cls.MAX_PHONES),
             MAX_EMAILS=env_int("MAX_EMAILS", cls.MAX_EMAILS),
             MAX_FAXES=env_int("MAX_FAXES", cls.MAX_FAXES),
             MAX_CATEGORIES_MAIN=env_int("MAX_CATEGORIES_MAIN", cls.MAX_CATEGORIES_MAIN),
-
             OUT_DIR=env_str("OUT_DIR", cls.OUT_DIR),
             OUT_PREFIX=env_str("OUT_PREFIX", cls.OUT_PREFIX),
-
             WEB_FORCE_OVERWRITE=env_bool01("WEB_FORCE_OVERWRITE", cls.WEB_FORCE_OVERWRITE),
             WEB_MAX_ITEMS=env_int("WEB_MAX_ITEMS", cls.WEB_MAX_ITEMS),
             WEB_TIMEOUT_SEC=env_int("WEB_TIMEOUT_SEC", cls.WEB_TIMEOUT_SEC),
-
             CHROME_EXE=env_str("CHROME_EXE", cls.CHROME_EXE),
             DEBUG_HOST=env_str("DEBUG_HOST", cls.DEBUG_HOST),
             DEBUG_PORT=env_int("DEBUG_PORT", cls.DEBUG_PORT),
             CHROME_PROFILE_DIR=env_str("CHROME_PROFILE_DIR", cls.CHROME_PROFILE_DIR),
-            CHROME_START_TIMEOUT_SEC=env_int("CHROME_START_TIMEOUT_SEC", cls.CHROME_START_TIMEOUT_SEC),
-
+            CHROME_START_TIMEOUT_SEC=env_int(
+                "CHROME_START_TIMEOUT_SEC", cls.CHROME_START_TIMEOUT_SEC
+            ),
             SELENIUM_HEADLESS=env_bool01("SELENIUM_HEADLESS", cls.SELENIUM_HEADLESS),
-            SELENIUM_PAGE_WAIT_SEC=env_float("SELENIUM_PAGE_WAIT_SEC", cls.SELENIUM_PAGE_WAIT_SEC),
-            SELENIUM_WAIT_CONTACTS_SEC=env_int("SELENIUM_WAIT_CONTACTS_SEC", cls.SELENIUM_WAIT_CONTACTS_SEC),
-            CLOSE_EXISTING_DEBUG_CHROME=env_bool01("CLOSE_EXISTING_DEBUG_CHROME", cls.CLOSE_EXISTING_DEBUG_CHROME),
-
+            SELENIUM_PAGE_WAIT_SEC=env_float(
+                "SELENIUM_PAGE_WAIT_SEC", cls.SELENIUM_PAGE_WAIT_SEC
+            ),
+            SELENIUM_WAIT_CONTACTS_SEC=env_int(
+                "SELENIUM_WAIT_CONTACTS_SEC", cls.SELENIUM_WAIT_CONTACTS_SEC
+            ),
+            CLOSE_EXISTING_DEBUG_CHROME=env_bool01(
+                "CLOSE_EXISTING_DEBUG_CHROME", cls.CLOSE_EXISTING_DEBUG_CHROME
+            ),
             SELENIUM_START_URL=env_str("SELENIUM_START_URL", cls.SELENIUM_START_URL),
-            SELENIUM_WAIT_FOR_ENTER=env_bool01("SELENIUM_WAIT_FOR_ENTER", cls.SELENIUM_WAIT_FOR_ENTER),
-
-            SELENIUM_SCROLL_TO_END=env_bool01("SELENIUM_SCROLL_TO_END", cls.SELENIUM_SCROLL_TO_END),
-            SELENIUM_SCROLL_MAX_SEC=env_float("SELENIUM_SCROLL_MAX_SEC", cls.SELENIUM_SCROLL_MAX_SEC),
-            SELENIUM_SCROLL_STEP_SEC=env_float("SELENIUM_SCROLL_STEP_SEC", cls.SELENIUM_SCROLL_STEP_SEC),
-            SELENIUM_SCROLL_STABLE_ROUNDS=env_int("SELENIUM_SCROLL_STABLE_ROUNDS", cls.SELENIUM_SCROLL_STABLE_ROUNDS),
-
-            SELENIUM_LIST_ITEM_CSS=env_str("SELENIUM_LIST_ITEM_CSS", cls.SELENIUM_LIST_ITEM_CSS),
-            SELENIUM_END_MARKER_CSS=env_str("SELENIUM_END_MARKER_CSS", cls.SELENIUM_END_MARKER_CSS),
-
-            SELENIUM_OPEN_URL_IN_NEW_TAB=env_bool01("SELENIUM_OPEN_URL_IN_NEW_TAB", cls.SELENIUM_OPEN_URL_IN_NEW_TAB),
+            SELENIUM_WAIT_FOR_ENTER=env_bool01(
+                "SELENIUM_WAIT_FOR_ENTER", cls.SELENIUM_WAIT_FOR_ENTER
+            ),
+            SELENIUM_SCROLL_TO_END=env_bool01(
+                "SELENIUM_SCROLL_TO_END", cls.SELENIUM_SCROLL_TO_END
+            ),
+            SELENIUM_SCROLL_MAX_SEC=env_float(
+                "SELENIUM_SCROLL_MAX_SEC", cls.SELENIUM_SCROLL_MAX_SEC
+            ),
+            SELENIUM_SCROLL_STEP_SEC=env_float(
+                "SELENIUM_SCROLL_STEP_SEC", cls.SELENIUM_SCROLL_STEP_SEC
+            ),
+            SELENIUM_SCROLL_STABLE_ROUNDS=env_int(
+                "SELENIUM_SCROLL_STABLE_ROUNDS", cls.SELENIUM_SCROLL_STABLE_ROUNDS
+            ),
+            SELENIUM_LIST_ITEM_CSS=env_str(
+                "SELENIUM_LIST_ITEM_CSS", cls.SELENIUM_LIST_ITEM_CSS
+            ),
+            SELENIUM_END_MARKER_CSS=env_str(
+                "SELENIUM_END_MARKER_CSS", cls.SELENIUM_END_MARKER_CSS
+            ),
+            SELENIUM_OPEN_URL_IN_NEW_TAB=env_bool01(
+                "SELENIUM_OPEN_URL_IN_NEW_TAB", cls.SELENIUM_OPEN_URL_IN_NEW_TAB
+            ),
             SELENIUM_RETURN_TO_ORIGINAL_TAB=env_bool01(
                 "SELENIUM_RETURN_TO_ORIGINAL_TAB", cls.SELENIUM_RETURN_TO_ORIGINAL_TAB
             ),
-            SELENIUM_KEEP_CHROME_OPEN=env_bool01("SELENIUM_KEEP_CHROME_OPEN", cls.SELENIUM_KEEP_CHROME_OPEN),
-
+            SELENIUM_KEEP_CHROME_OPEN=env_bool01(
+                "SELENIUM_KEEP_CHROME_OPEN", cls.SELENIUM_KEEP_CHROME_OPEN
+            ),
             VERBOSE=env_bool01("VERBOSE", cls.VERBOSE),
         )

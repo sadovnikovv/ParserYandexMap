@@ -113,6 +113,15 @@ def write_request_sheet(ws, request_meta: Dict[str, Any]) -> None:
 
 def write_companies_sheet(ws, st: Settings, companies: List[Company]) -> None:
     ws.title = "Организации"
+
+    # Сортировка по «Количество оценок» (по убыванию).
+    # Пустые или нечисловые значения уходят в конец.
+    def _sort_key(c: Company) -> int:
+        v = _to_int_maybe(getattr(c, "Количество_оценок", ""))
+        return v if v is not None else -1
+
+    companies_sorted = sorted(companies, key=_sort_key, reverse=True)
+
     ws.append(st.HEADERS)
 
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -129,14 +138,14 @@ def write_companies_sheet(ws, st: Settings, companies: List[Company]) -> None:
         cell.font = header_font
         cell.alignment = header_alignment
 
-    rows = [c.as_excel_row() for c in companies]
+    rows = [c.as_excel_row() for c in companies_sorted]
     for r in rows:
         ws.append([r.get(h, "") for h in st.HEADERS])
 
     idx_raw = _find_col_idx(st.HEADERS, "raw_json")
     idx_id = _find_col_idx(st.HEADERS, "ID")
     idx_rating = _find_col_idx(st.HEADERS, "Рейтинг")
-    idx_rating_count = _find_col_idx(st.HEADERS, "Количество оценок")   # <-- НОВОЕ
+    idx_rating_count = _find_col_idx(st.HEADERS, "Количество оценок")
     idx_reviews = _find_col_idx(st.HEADERS, "Количество отзывов")
 
     # 1) Выравнивание + числовые форматы

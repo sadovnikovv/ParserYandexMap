@@ -159,12 +159,12 @@ def collect_companies_from_selenium_live_maps(st: Settings) -> Tuple[List[Compan
     request_meta: Dict[str, Any] = {"mode": "SELENIUM", "start_url": st.SELENIUM_START_URL}
 
     pool = SeleniumPool(st, keep_chrome_open=bool(st.SELENIUM_KEEP_CHROME_OPEN))
-    pool.ensure()
-
-    assert pool.driver is not None
-    driver = pool.driver
 
     try:
+        pool.ensure()
+        assert pool.driver is not None
+        driver = pool.driver
+
         request_meta["maps_tab"] = _ensure_maps_tab(driver, st.SELENIUM_START_URL)
         time.sleep(float(st.SELENIUM_PAGE_WAIT_SEC))
 
@@ -192,9 +192,17 @@ def collect_companies_from_selenium_live_maps(st: Settings) -> Tuple[List[Compan
         request_meta["parse"] = parse_meta
         request_meta["rows_initial"] = len(companies)
 
-        # ВАЖНО: Chrome/вкладку не закрываем (по требованию).
+        # ВАЖНО: сам Chrome/вкладку не закрываем (по требованию пользователя).
+        # SeleniumPool.close() при keep_chrome_open=True лишь завершает
+        # WebDriver-сессию (driver.quit()), но НЕ закрывает Chrome — окно
+        # остаётся открытым и готовым к следующему запуску.
         return companies, request_meta, ""
 
     except Exception as e:
         request_meta["error"] = safe_str(e)
         return [], request_meta, safe_str(e)
+
+    finally:
+        # Всегда завершаем WebDriver-сессию, иначе chromedriver останется жить
+        # и на следующем запуске два драйвера начнут конфликтовать за один Chrome.
+        pool.close()

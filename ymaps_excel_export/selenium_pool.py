@@ -82,7 +82,16 @@ class SeleniumPool:
     - поднимает Chrome с remote debugging (или аттачится к существующему);
     - умеет вручную “переждать” капчу;
     - отдаёт page_source после ожидания блока контактов;
-    - в режиме keep_chrome_open=True не закрывает Chrome (для MODE=SELENIUM).
+    - в режиме keep_chrome_open=True не закрывает сам Chrome (для MODE=SELENIUM).
+
+    ВАЖНО про жизненный цикл:
+    - метод close() ВСЕГДА вызывает driver.quit() — это завершает chromedriver
+      и освобождает CDP-сессию. При attach через debuggerAddress driver.quit()
+      НЕ закрывает сам Chrome (документированное поведение Selenium 4).
+    - если keep_chrome_open=False и Chrome был запущен нами — дополнительно
+      закрываем процесс Chrome.
+    - Без корректного quit() на повторном запуске остаётся осиротевший
+      chromedriver, и новый драйвер конфликтует с ним — Chrome зависает.
     """
 
     def __init__(self, st: Settings, *, keep_chrome_open: bool = False):
@@ -178,20 +187,30 @@ class SeleniumPool:
         return html
 
     def close(self) -> None:
-        # В SELENIUM режиме Chrome не закрываем (пользователь закрывает сам)
-        if self.keep_chrome_open:
-            self.driver = None
-            self.proc = None
-            return
-
-        if self.driver:
+        # ВСЕГДА корректно завершаем WebDriver-сессию.
+        #
+        # При attach через debuggerAddress driver.quit():
+        #   - останавливает chromedriver и освобождает CDP-сессию;
+        #   - НЕ закрывает сам Chrome.
+        #
+        # Без этого chromedriver остаётся жить после завершения Python-процесса,
+        # и на следующем запуске два chromedriver'а конкурируют за один Chrome —
+        # Chrome зависает.
+        if self.driver is not None:
             try:
                 self.driver.quit()
             except Exception:
                 pass
             self.driver = None
 
-        if self.started_by_us and self.proc:
+        # При keep_chrome_open=True Chrome остаётся пользователю.
+        # Мы лишь забываем про его процесс — сам процесс не трогаем.
+        if self.keep_chrome_open:
+            self.proc = None
+            return
+
+        # Иначе: если Chrome запускали мы — закрываем процесс Chrome.
+        if self.started_by_us and self.proc is not None:
             try:
                 self.proc.terminate()
                 self.proc.wait(timeout=5)
